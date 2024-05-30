@@ -886,7 +886,7 @@ impl Backend {
         tx_hash: B256,
         journaled_state: &mut JournaledState,
     ) -> eyre::Result<Option<Transaction>> {
-        trace!(?id, ?tx_hash, "replay until transaction");
+        info!(?id, ?tx_hash, "replay until transaction");
 
         let fork_id = self.ensure_fork_id(id)?.clone();
 
@@ -901,7 +901,7 @@ impl Backend {
                 if is_known_system_sender(tx.from) ||
                     tx.transaction_type == Some(SYSTEM_TRANSACTION_TYPE)
                 {
-                    trace!(tx=?tx.hash, "skipping system transaction");
+                    info!(tx=?tx.hash, "skipping system transaction");
                     continue;
                 }
 
@@ -909,7 +909,7 @@ impl Backend {
                     // found the target transaction
                     return Ok(Some(tx))
                 }
-                trace!(tx=?tx.hash, "committing transaction");
+                info!(tx=?tx.hash, "committing transaction");
 
                 commit_transaction(
                     WithOtherFields::new(tx),
@@ -1210,24 +1210,30 @@ impl DatabaseExt for Backend {
         env: &mut Env,
         journaled_state: &mut JournaledState,
     ) -> eyre::Result<()> {
-        trace!(?id, ?transaction, "roll fork to transaction");
+        info!(?id, ?transaction, "roll fork to transaction");
         let id = self.ensure_fork(id)?;
 
         let (to_block, _) =
             self.get_block_number_and_block_for_transaction(id, transaction)?;
 
-        for fork_block in env.block.number.to::<u64>()..to_block {
+        let start_block = env.block.number.to::<u64>() + 1;
+
+        for fork_block in start_block..to_block {
+            info!(?id, ?fork_block, "roll to next block");
             let fork = self.inner.get_fork_by_id(id)?;
             let block = fork.db.db.get_full_block(fork_block)?;
             // roll the fork to the transaction's block or latest if it's pending
-            self.roll_fork(Some(id), fork_block, env, journaled_state)?;
+            self.roll_fork(Some(id), fork_block - 1, env, journaled_state)?;
 
-            update_env_block(env, fork_block, &block);
+            update_env_block(env, fork_block - 1, &block);
 
             // replay all transactions that came before
             let env = env.clone();
 
-            let tx = if fork_block == to_block { transaction } else { b256!("0000000000000000000000000000000000000000000000000000000000000000") };
+            let tx = match fork_block == to_block {
+                true => transaction,
+                false => b256!("0000000000000000000000000000000000000000000000000000000000000000"),
+            };
 
             self.replay_until(id, env, tx, journaled_state)?;
         }
@@ -1892,11 +1898,22 @@ fn commit_transaction<I: InspectorExt<Backend>>(
         let db = Backend::new_with_fork(fork_id, fork, journaled_state);
         crate::utils::new_evm_with_inspector(db, env, inspector)
             .transact()
-            .wrap_err("backend: failed committing transaction")?
+            //.wrap_err_with(|| format!("backend: failed committing transaction. txHash: {}", tx.hash))?
+            // .map_err(|e| error!("backend: failed committing transaction: {}", e))?;
+            // .wrap_err("backend: failed committing transaction")?
     };
-    trace!(elapsed = ?now.elapsed(), "transacted transaction");
 
-    apply_state_changeset(res.state, journaled_state, fork)?;
+    let new_res = match res {
+        Ok(t) => t,
+        Err(e) => { 
+            error!("backend: failed committing transaction: {}", e);
+            return Err(e).wrap_err("backend: failed committing transaction");
+        }
+    };
+
+    info!(elapsed = ?now.elapsed(), "transacted transaction");
+
+    apply_state_changeset(new_res.state, journaled_state, fork)?;
     Ok(())
 }
 
