@@ -1213,12 +1213,14 @@ impl DatabaseExt for Backend {
         info!(?id, ?transaction, "roll fork to transaction");
         let id = self.ensure_fork(id)?;
 
-        let (to_block, _) =
+        let (mut end_block, _) =
             self.get_block_number_and_block_for_transaction(id, transaction)?;
+        
+        end_block += 1;
 
         let start_block = env.block.number.to::<u64>() + 1;
 
-        for fork_block in start_block..to_block {
+        for fork_block in start_block..end_block {
             info!(?id, ?fork_block, "roll to next block");
             let fork = self.inner.get_fork_by_id(id)?;
             let block = fork.db.db.get_full_block(fork_block)?;
@@ -1230,7 +1232,7 @@ impl DatabaseExt for Backend {
             // replay all transactions that came before
             let env = env.clone();
 
-            let tx = match fork_block == to_block {
+            let tx = match fork_block == end_block {
                 true => transaction,
                 false => b256!("0000000000000000000000000000000000000000000000000000000000000000"),
             };
